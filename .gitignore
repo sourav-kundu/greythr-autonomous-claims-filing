@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+auth/
+browser-data/
+.env
+*.log
+.DS_Store
+.claude/

@@ -1,0 +1,38 @@
+{
+  "name": "greythr-claims-bot",
+  "version": "1.0.0",
+  "description": "Automate GreytHR travel reimbursement claims via WhatsApp",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "start:built": "node dist/index.js",
+    "setup:browser": "npx playwright install chromium"
+  },
+  "keywords": [
+    "greythr",
+    "claims",
+    "whatsapp",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@google/generative-ai": "^0.24.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "dotenv": "^17.3.1",
+    "openai": "^6.32.0",
+    "pino": "^10.3.1",
+    "playwright": "^1.58.2",
+    "qrcode-terminal": "^0.12.0",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
