@@ -15,6 +15,12 @@ let sock: WASocket | null = null;
 
 export type MessageHandler = (sock: WASocket) => void;
 
+// Only process group chats — ignore DMs, status broadcasts, newsletters, etc.
+// at the socket level so Baileys never even syncs them.
+function isAllowedJid(jid: string | undefined | null): boolean {
+  return !!jid && jid.endsWith('@g.us');
+}
+
 export async function startWhatsApp(onReady: MessageHandler): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(config.paths.auth);
   const { version } = await fetchLatestBaileysVersion();
@@ -25,6 +31,14 @@ export async function startWhatsApp(onReady: MessageHandler): Promise<void> {
       auth: state,
       logger,
       browser: ['GreytHR Claims Bot', 'Chrome', '1.0.0'],
+      // Don't appear online (also reduces sync chatter)
+      markOnlineOnConnect: false,
+      // Never sync chat history — we only care about live messages going forward
+      syncFullHistory: false,
+      shouldSyncHistoryMessage: () => false,
+      // Drop any message addressed to a non-group JID before Baileys processes it.
+      // This prevents the bot from "syncing" with personal DM threads.
+      shouldIgnoreJid: (jid) => !isAllowedJid(jid),
     });
 
     sock.ev.on('creds.update', saveCreds);
