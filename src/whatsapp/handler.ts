@@ -132,6 +132,8 @@ async function processSingleInvoice(rawMsg: WAMessage): Promise<ProcessedInvoice
       expenseCategory: parsed.expenseCategory,
       filePath,
       fileName,
+      amountBeforeTax: parsed.amountBeforeTax,
+      taxAmount: parsed.taxAmount,
     });
 
     lastLineItemId = lineItem.id;

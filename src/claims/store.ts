@@ -15,6 +15,12 @@ export interface LineItem {
   expenseCategory: ExpenseCategory;
   filePath: string; // path to the saved invoice file
   fileName: string;
+  // Tax bifurcation — only used for Cadence claims with Food items.
+  // GreytHR's Cadence form has separate "Amount Before Tax" and "Tax Amount"
+  // fields for Other-expenses (food). For Travel Expense (taxi) the form
+  // accepts 0.00 for both, so we leave these undefined.
+  amountBeforeTax?: number;
+  taxAmount?: number;
 }
 
 export type ClaimType = 'non-cadence' | 'cadence';

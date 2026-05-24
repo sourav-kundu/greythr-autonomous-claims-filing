@@ -21,6 +21,22 @@ const CLAIM_TYPE_LABELS: Record<string, string> = {
   'cadence': 'Travel Expenses - Cadence',
 };
 
+// The Cadence claim form uses a different category dropdown than non-cadence:
+// non-cadence offers Conveyance/Food/Airfare/Stay/etc directly; Cadence only
+// offers "Travel Expense" and "Other expenses". Map our internal categories
+// to the cadence labels.
+const CADENCE_CATEGORY_LABEL: Record<string, string> = {
+  Conveyance: 'Travel Expense',
+  Food: 'Other expenses',
+};
+
+function categoryLabelFor(claim: Claim, item: LineItem): string {
+  if (claim.claimType === 'cadence') {
+    return CADENCE_CATEGORY_LABEL[item.expenseCategory] || item.expenseCategory;
+  }
+  return item.expenseCategory;
+}
+
 // Persistent browser session — kept open between fill and submit phases
 let activeContext: BrowserContext | null = null;
 let activePage: Page | null = null;
@@ -201,7 +217,7 @@ async function selectDateInPicker(page: Page, dateStr: string): Promise<void> {
   await page.waitForTimeout(300);
 }
 
-async function fillAndSaveEntry(page: Page, item: LineItem): Promise<void> {
+async function fillAndSaveEntry(page: Page, item: LineItem, claim: Claim): Promise<void> {
   // Fill Receipt No
   console.log(`    Receipt No: ${item.invoiceNumber}`);
   await page.locator('input[name="receipt"]').click();
@@ -212,6 +228,26 @@ async function fillAndSaveEntry(page: Page, item: LineItem): Promise<void> {
   await page.locator('input[name="amount"]').click();
   await page.keyboard.press('Meta+a');
   await page.keyboard.type(item.amount.toString(), { delay: 20 });
+
+  // Cadence-only tax bifurcation for Food (Other expenses). For Travel Expense
+  // and for non-cadence claims these fields either don't exist or accept 0.00.
+  if (claim.claimType === 'cadence' && item.expenseCategory === 'Food') {
+    const before = item.amountBeforeTax ?? item.amount;
+    const tax = item.taxAmount ?? 0;
+    console.log(`    Amount Before Tax: ${before}, Tax Amount: ${tax}`);
+    const beforeInput = page.locator('input[name="amountBeforeTax"]');
+    if (await beforeInput.isVisible().catch(() => false)) {
+      await beforeInput.click();
+      await page.keyboard.press('Meta+a');
+      await page.keyboard.type(before.toString(), { delay: 20 });
+    }
+    const taxInput = page.locator('input[name="taxAmount"]');
+    if (await taxInput.isVisible().catch(() => false)) {
+      await taxInput.click();
+      await page.keyboard.press('Meta+a');
+      await page.keyboard.type(tax.toString(), { delay: 20 });
+    }
+  }
 
   // Fill Remarks
   console.log(`    Remarks: ${item.description}`);
@@ -253,10 +289,11 @@ async function fillAndSaveEntry(page: Page, item: LineItem): Promise<void> {
   await page.waitForTimeout(1000);
 }
 
-async function addLineItemEntry(page: Page, item: LineItem, index: number, isFirstEntry: boolean): Promise<void> {
-  console.log(`  Step 3.${index + 1}: Adding ${item.expenseCategory} entry — "${item.description}"...`);
-  await selectCategoryAndAddEntry(page, item.expenseCategory, isFirstEntry);
-  await fillAndSaveEntry(page, item);
+async function addLineItemEntry(page: Page, item: LineItem, index: number, isFirstEntry: boolean, claim: Claim): Promise<void> {
+  const categoryLabel = categoryLabelFor(claim, item);
+  console.log(`  Step 3.${index + 1}: Adding ${categoryLabel} entry (${item.expenseCategory}) — "${item.description}"...`);
+  await selectCategoryAndAddEntry(page, categoryLabel, isFirstEntry);
+  await fillAndSaveEntry(page, item, claim);
 }
 
 async function fillGeneralRemarks(page: Page, claim: Claim): Promise<string> {
@@ -340,7 +377,7 @@ export async function fillClaimOnGreytHR(
         await selectClaimType(page, claim);
 
         for (let i = 0; i < claim.lineItems.length; i++) {
-          await addLineItemEntry(page, claim.lineItems[i], i, i === 0);
+          await addLineItemEntry(page, claim.lineItems[i], i, i === 0, claim);
         }
 
         const totalAmount = await fillGeneralRemarks(page, claim);
