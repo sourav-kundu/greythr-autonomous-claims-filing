@@ -6,18 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GreytHR Claims Bot — a WhatsApp-based automation tool that lets users send travel invoices (images/PDFs) to a WhatsApp group, parses them with AI (vision), and files reimbursement claims on BrowserStack's GreytHR instance via Playwright browser automation.
 
-Target users are BrowserStack employees on macOS who need to file travel reimbursement claims. The tool supports two expense categories: **Conveyance** (taxi/Uber/transport) and **Food** (restaurant/lunch/meals).
+Target users are BrowserStack employees on macOS who need to file travel reimbursement claims. The tool supports two user-facing expense categories: **Conveyance** (taxi/Uber/transport) and **Food** (restaurant/lunch/meals). These map to different GreytHR dropdown labels depending on claim type — see "Claim type differences" under the Filer section.
 
 ## Build and Run Commands
 
 ```bash
 npm install                    # Install dependencies
 npm run setup:browser          # Install Playwright Chromium (required once)
-npm start                      # Run with tsx (development)
-npm run build                  # Compile TypeScript to dist/
+npm start                      # Run with tsx (development AND production)
+npm run build                  # Compile TypeScript to dist/ (optional — not needed for production)
 npm run start:built            # Run compiled JS
 npx tsc --noEmit               # Type-check without emitting
 ```
+
+**Production runs from source via tsx.** The recommended deployment is a launchd plist that invokes `node node_modules/tsx/dist/cli.mjs src/index.ts`, so `git pull` is sufficient to roll out code changes (no build step). See README's "Always-on with launchd" section for the plist template. The `dist/` build target is kept available for pm2 / other process managers that prefer compiled JS.
 
 ## Architecture
 
@@ -38,8 +40,9 @@ The app is a long-running Node.js process with four subsystems:
 - `invoice.ts` defines the common interface, system prompt, and provider routing
 - Provider implementations: `anthropic.ts`, `openai.ts`, `gemini.ts`
 - All providers receive invoice as base64-encoded image/PDF and return structured JSON
-- Extracts 5 fields: `description`, `amount`, `currency`, `invoiceNumber`, `date`, `expenseCategory`
+- Extracts: `description`, `amount`, `currency`, `invoiceNumber`, `date`, `expenseCategory`, and optionally `amountBeforeTax` / `taxAmount`
 - `expenseCategory` is auto-classified as "Conveyance" (transport) or "Food" (meals) by the AI
+- `amountBeforeTax` / `taxAmount` are extracted **only for Food bills** that show a tax breakdown (GST/CGST+SGST/VAT). The parser also validates `amountBeforeTax + taxAmount ≈ amount` (within 1 unit of rounding) and drops both fields if they don't reconcile. These are used by the Filer only when filing a Cadence claim (see Filer section).
 - Adding a new provider: create a new file in `src/parser/`, register in `invoice.ts` parser map
 
 ### 3. Claims Store (`src/claims/store.ts`)
@@ -61,15 +64,31 @@ Playwright automation against BrowserStack's GreytHR instance. The exact flow ma
 3. Select claim type radio button: "Travel Expenses - Others than cadence" or "Travel Expenses - Cadence"
 4. Click **"Create Claim"**
 5. For each line item:
-   - Select expense category from dropdown ("Conveyance" or "Food")
+   - Select expense category from dropdown (label depends on claim type — see below)
    - Click **"Add Entry"**
    - Fill: Receipt No, Claim Date, Claim Amount, Remarks
+   - For Cadence + Food entries only: also fill **Amount Before Tax** and **Tax Amount**
    - Upload attachment via file input
    - Click **"Save"**
-6. Fill **"General Remarks"** with overall claim description
+6. Fill outer **Remarks** (`tmplCustomField1`, required for both claim types) and **General Remarks** with the overall claim description
 7. Click **"Send for Approval"**
 
 Retry strategy: 3 attempts with increasing delays (5s, 10s, 20s). On failure, falls back to **"Save & submit later"** button. Uses persistent browser context (`browser-data/`) so Google SSO session survives across restarts.
+
+#### Claim type differences
+
+The Cadence and non-cadence forms on GreytHR are structurally different. The filer adapts based on `claim.claimType`:
+
+| | Non-cadence | Cadence |
+|---|---|---|
+| Category dropdown options | Conveyance, Food, Airfare, Stay Expenses, Internet, Mobile, Other expenses, Travel Insurance, Visa | **Travel Expense, Other expenses** (only two) |
+| Conveyance bills go to | "Conveyance" | "Travel Expense" |
+| Food bills go to | "Food" | "Other expenses" |
+| Per-entry tax fields (`amountBeforeTax`, `taxAmount`) | Don't exist on the form | Exist, but only required to be filled for **Food** (Other expenses). Travel Expense entries leave them at 0.00 — HR doesn't require tax bifurcation for taxi/Uber bills. |
+
+The category mapping lives in `CADENCE_CATEGORY_LABEL` in `filer.ts`. The tax-field fill is gated on `claim.claimType === 'cadence' && item.expenseCategory === 'Food'`.
+
+If the parser couldn't extract a tax breakdown for a Food bill (no GST shown on the receipt), the filer falls back to `amountBeforeTax = amount, taxAmount = 0` so the form saves — GreytHR doesn't enforce `amount == before + tax` server-side.
 
 ## WhatsApp Conversation Flow
 
@@ -81,9 +100,12 @@ User types "submit [optional description]"
   → Bot shows summary with all line items
   → Asks claim type: reply "1" (non-cadence) or "2" (cadence)
 User types "1" or "2"
-  → Bot confirms claim type, asks for final "confirm"
-User types "confirm"
-  → Playwright files on GreytHR
+  → Bot confirms claim type and asks for final "yes"
+User types "yes" (also accepted: "y", "confirm")
+  → Playwright fills the claim on GreytHR (does NOT submit)
+  → Bot reports back and asks: reply "1" to submit for approval, "2" to save as draft
+User types "1" or "2"
+  → Playwright clicks the corresponding GreytHR button
   → Bot returns result URL
 ```
 
@@ -96,10 +118,11 @@ User types "confirm"
 | `amount is 750` | Correct last parsed invoice's amount |
 | `description should be ...` | Correct description |
 | `category should be Food` | Correct expense category |
+| `correct #2 amount to 500` | Correct a specific line item |
 | `status` | Show current claim summary |
 | `submit [description]` | Show summary + ask claim type |
-| `1` or `2` | Select claim type (when prompted) |
-| `confirm` | File the claim on GreytHR |
+| `1` or `2` | Select claim type (when prompted), then later: 1=submit, 2=save draft |
+| `yes` / `y` / `confirm` | Proceed with filing on GreytHR (after claim type chosen) |
 | `cancel` | Cancel active claim |
 
 ## Key Design Decisions
@@ -110,7 +133,8 @@ User types "confirm"
 - **Single active claim**: Only one claim session exists at a time per group. Simplifies state management since WhatsApp group chat is inherently sequential.
 - **Auto-start claims**: Users don't need to type "start new claim" — sending an invoice auto-creates one. New day auto-closes stale claims.
 - **fromMe handling**: Since the bot runs on the user's own WhatsApp (linked device), all user messages have `fromMe=true`. The handler processes these and only skips truly empty echo messages.
-- **Two expense categories only**: Conveyance and Food. This matches the most common BrowserStack travel claim items. Other categories (Airfare, Stay, etc.) exist in GreytHR but are not yet supported.
+- **Two user-facing expense categories**: Conveyance and Food. These cover the most common BrowserStack travel claim items. Other GreytHR categories (Airfare, Stay, etc.) exist on the non-cadence form but are not yet supported by the bot — extending the parser's `ExpenseCategory` type and the filer's dropdown selection would cover them.
+- **Reconnect strategy**: `client.ts` exponentially backs off (5s → 5min) for recoverable disconnects, immediately reconnects on `restartRequired` (515), and **stops** reconnecting for fatal reasons (`loggedOut`, `connectionReplaced`, `badSession`, `multideviceMismatch`, `forbidden`). The fatal-reason list prevents notification storms — every reconnect triggers a phone-side "Finished syncing" notification, so blind 3s retries used to spam the user.
 
 ## GreytHR-Specific Details
 
@@ -118,8 +142,13 @@ User types "confirm"
 - Claims path: `/v2/employee/claims/advance`
 - Login: Google SSO only (no username/password)
 - Claim types supported: "Travel Expenses - Others than cadence", "Travel Expenses - Cadence"
-- Expense dropdown options used: "Conveyance", "Food"
-- Entry form fields: Receipt No, Claim Date, Claim Amount (INR), Attachment, Remarks
+- Expense dropdown options used:
+  - Non-cadence: "Conveyance", "Food"
+  - Cadence: "Travel Expense", "Other expenses"
+- Entry form fields:
+  - Both: Receipt No, Claim Date, Claim Amount (INR), Attachment, Remarks
+  - Cadence-only extras: Amount Before Tax, Tax Amount (filled by bot only for Food in cadence; otherwise left at 0.00)
+- Outer-form Remarks: `input[name="tmplCustomField1"]` — required for both claim types
 - After all entries: General Remarks, then "Send for Approval"
 - Fallback on failure: "Save & submit later"
 
@@ -129,6 +158,19 @@ User types "confirm"
 - `data/` — Stored claims, invoice files, claim.json
 - `browser-data/` — Playwright persistent browser profile with GreytHR SSO cookies
 - `.env` — API keys and configuration
+- `logs/` — Runtime stdout/stderr from the launchd service (`bot.out.log`, `bot.err.log`)
+
+## Running in Production
+
+The recommended deployment is a per-user launchd plist at `~/Library/LaunchAgents/com.<user>.greythr-claims-bot.plist` that invokes the bot directly from TypeScript source via tsx (see README "Always-on with launchd" for the template). This means **deploying a code change is just `git pull` + `launchctl kickstart -k gui/$(id -u)/com.<user>.greythr-claims-bot`** — no build step.
+
+When debugging the running bot:
+- `tail -f logs/bot.out.log` — runtime output (connections, claim filings, errors raised by handler logic)
+- `tail -f logs/bot.err.log` — Baileys pino logger output (Signal protocol session churn, mostly noise; useful for connection issues)
+- `launchctl list | grep claims` — verify the service is up and get its PID
+- `ps -p <PID> -o etime,command` — uptime
+
+The launchd plist has `KeepAlive` with `Crashed=true, SuccessfulExit=false`, so a crash auto-restarts (with a 15s `ThrottleInterval`). A clean exit (e.g. `loggedOut` disconnect) does **not** auto-restart — by design, since those cases need manual intervention (re-scan QR, etc.).
 
 ## Environment Variables
 

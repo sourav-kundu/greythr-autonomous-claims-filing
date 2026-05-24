@@ -13,10 +13,12 @@ Automate GreytHR travel reimbursement claims via WhatsApp. Send invoices to a Wh
 
 ## Prerequisites
 
-- **Node.js** v18+ ([install via Homebrew](https://brew.sh): `brew install node`)
-- **AI API Key** from one of: [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), or [Google Gemini](https://aistudio.google.com/)
-- **WhatsApp** account (bot links as a paired device)
-- **GreytHR** account with Google SSO access
+- **macOS** (uses Playwright Chromium + an optional launchd service for always-on running). It will mostly work on Linux too, but the launchd instructions below are Mac-only.
+- **Node.js** v18+ — `brew install node`
+- **AI API Key** from one of: [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), or [Google Gemini](https://aistudio.google.com/). Anthropic Claude is the default and recommended.
+- **A WhatsApp account** that you can scan a QR code with. The bot links itself as a paired device.
+- **A GreytHR account** with Google SSO access (BrowserStack employees: this is your existing greythr.com account).
+- **A dedicated WhatsApp group for yourself.** *Important: each user needs their own group.* The bot is single-user — multiple people sharing one group will cause crossed conversations. The simplest setup is a 1-person group with just your own number.
 
 ## Setup
 
@@ -24,26 +26,92 @@ Automate GreytHR travel reimbursement claims via WhatsApp. Send invoices to a Wh
 git clone https://github.com/sourav-kundu/greythr-autonomous-claims-filing.git
 cd greythr-autonomous-claims-filing
 npm install
-npm run setup:browser    # Install Playwright Chromium
-cp .env.example .env     # Then edit .env with your API key
+npm run setup:browser    # Installs Playwright Chromium
+cp .env.example .env     # Then edit .env (see below)
+```
+
+Edit `.env` and set at minimum:
+- `ANTHROPIC_API_KEY` (or whichever provider you chose)
+- `WHATSAPP_GROUP_NAME` — the exact name of the WhatsApp group you created (case-sensitive, must match exactly)
+
+Then start the bot:
+
+```bash
 npm start
 ```
 
-On first run:
-1. **Scan the QR code** in terminal with WhatsApp (Settings → Linked Devices)
-2. **Complete Google SSO** when the browser opens for GreytHR (one-time; session is saved)
+### First run — interactive
+
+You'll need to do two one-time logins:
+
+1. **WhatsApp** — a QR code appears in the terminal. Open WhatsApp on your phone → Settings → Linked Devices → Link a device → scan the code. Credentials are saved to `auth/` so this is one-time.
+2. **GreytHR Google SSO** — when you trigger your first claim, a Chromium window will open. Complete Google SSO once. Cookies are saved to `browser-data/` so this is also one-time.
+
+Both `auth/` and `browser-data/` are gitignored — they live only on your machine.
+
+## Always-on with launchd (recommended)
+
+Once you've confirmed the bot works with `npm start`, set it up as a launchd service so it survives reboots and crashes:
+
+```bash
+# Generate the plist for your user
+USER_DIR="$(pwd)"
+cat > ~/Library/LaunchAgents/com.$USER.greythr-claims-bot.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.$USER.greythr-claims-bot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>$USER_DIR/node_modules/tsx/dist/cli.mjs</string>
+    <string>$USER_DIR/src/index.ts</string>
+  </array>
+  <key>WorkingDirectory</key><string>$USER_DIR</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>$HOME</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/><key>Crashed</key><true/></dict>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>$USER_DIR/logs/bot.out.log</string>
+  <key>StandardErrorPath</key><string>$USER_DIR/logs/bot.err.log</string>
+</dict>
+</plist>
+EOF
+
+mkdir -p logs
+launchctl load ~/Library/LaunchAgents/com.$USER.greythr-claims-bot.plist
+```
+
+The plist runs the bot directly from TypeScript source via `tsx`, so **`git pull` is all you need to deploy new code** — no build step. Restart with:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.$USER.greythr-claims-bot
+```
+
+Check it's alive:
+
+```bash
+launchctl list | grep claims
+tail -f logs/bot.out.log
+```
 
 ## Environment Variables
 
 | Variable | Required | Default |
 |----------|----------|---------|
 | `AI_PROVIDER` | No | `anthropic` |
-| `AI_MODEL` | No | `claude-sonnet-4-20250514` |
+| `AI_MODEL` | No | `claude-sonnet-4-20250514` (consider upgrading to a newer Sonnet/Opus) |
 | `ANTHROPIC_API_KEY` | If using Anthropic | — |
 | `OPENAI_API_KEY` | If using OpenAI | — |
 | `GEMINI_API_KEY` | If using Gemini | — |
 | `GREYTHR_URL` | No | `https://browserstack.greythr.com` |
-| `WHATSAPP_GROUP_NAME` | No | `GreytHr Travel Reimbursement` |
+| `WHATSAPP_GROUP_NAME` | **Yes** | `GreytHr Travel Reimbursement` (change this) |
 | `BATCH_WINDOW_SECONDS` | No | `5` |
 
 ## WhatsApp Commands
@@ -58,10 +126,33 @@ On first run:
 | `correct #2 amount to 500` | Correct a specific invoice |
 | `status` | Show current claim summary |
 | `submit [description]` | Show summary, ask for claim type |
-| `1` or `2` | Select claim type (when prompted) |
+| `1` or `2` | Select claim type (when prompted — see below) |
 | `yes` / `y` | Confirm and start filing on GreytHR |
 | `1` (Submit) or `2` (Save Draft) | Final action after GreytHR is filled |
 | `cancel` | Cancel active claim |
+
+## Claim types — when to pick 1 or 2
+
+After typing `submit`, the bot asks:
+
+```
+Reply 1 for: Travel Expenses - Others than cadence
+Reply 2 for: Travel Expenses - Cadence
+```
+
+- **1 — Non-cadence**: Regular work travel — client visits, business trips, day-to-day travel for work. This is the common case.
+- **2 — Cadence**: Travel related to a Cadence event (offsites, team gatherings, stackconnects, all-hands). Your company-internal Cadence travel policy applies.
+
+The bot adapts the GreytHR form for whichever you pick — the category dropdowns and required fields are different between the two. You don't need to think about this; just pick the right claim type.
+
+### Cadence-specific behavior
+
+For Cadence claims, GreytHR's category dropdown only has "Travel Expense" and "Other expenses" (no Conveyance/Food). The bot automatically maps:
+
+- Conveyance bills (Uber, taxi) → **Travel Expense** in cadence form
+- Food bills (restaurants) → **Other expenses** in cadence form, with the **pre-tax amount and tax amount filled separately** (GreytHR requires this split for food in cadence). The parser tries to read the tax breakdown from the bill itself; if the bill doesn't show GST/tax explicitly, the bot puts the full amount under "before tax" and 0 under "tax".
+
+For non-cadence, this all works the way it did before — Conveyance/Food map directly.
 
 ## Example Conversation
 
@@ -97,6 +188,26 @@ You:   1
 Bot:   Claim submitted for approval!
 ```
 
+## Updating
+
+```bash
+git pull
+launchctl kickstart -k gui/$(id -u)/com.$USER.greythr-claims-bot
+tail -f logs/bot.out.log  # watch it come back up
+```
+
+No `npm run build` needed — the launchd service runs from TypeScript source via `tsx`. If you've added new dependencies, run `npm install` before the kickstart.
+
+## For Claude Code users
+
+This repo includes a `CLAUDE.md` at the root with architecture notes, conventions, and gotchas. Claude Code auto-loads it when you start a session in this directory, so you can ask things like:
+
+- "How does the cadence claim flow differ from non-cadence?"
+- "Where do I add a new AI provider?"
+- "Walk me through the WhatsApp message handling pipeline"
+
+…and Claude will already have the relevant context.
+
 ## Architecture
 
 ```
@@ -125,30 +236,24 @@ src/
 - **Swappable AI providers** — Anthropic/OpenAI/Gemini via adapter pattern
 - **Rolling-window batching** — multiple invoices sent quickly are processed in parallel
 
-## Keeping It Running
-
-```bash
-# Option A: Leave terminal open
-npm start
-
-# Option B: Use pm2
-npm run build
-pm2 start dist/index.js --name greythr-bot
-pm2 save && pm2 startup
-```
-
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
 | QR code keeps regenerating | Delete `auth/` folder, restart |
+| Phone keeps showing "Finished syncing with WhatsApp on Google Chrome (Claims Bot)" | Mute the `(You)` / "Message yourself" chat in WhatsApp — these notifications are pushed by WhatsApp, not the bot |
 | GreytHR login timed out | Complete SSO within 2 min, then retry with `yes` |
 | Claim saved as draft | Bot retried 3x and fell back. Complete manually at the provided URL |
-| Bot doesn't respond | Check terminal logs, verify `.env` keys, ensure group name matches exactly |
+| Bot doesn't respond | `tail -f logs/bot.out.log` and `logs/bot.err.log`. Verify `.env` keys and that `WHATSAPP_GROUP_NAME` exactly matches your group |
+| Bot won't restart after `launchctl kickstart` | Check `logs/bot.err.log` for the actual error. Common cause: changed dependencies but skipped `npm install` |
+| `Connection closed. Reason: 440` repeatedly | Another instance is using the same WhatsApp session. Find it with `ps aux \| grep tsx` or `launchctl list \| grep claims` and stop the duplicate |
 
 ## Security
 
-All secrets live in `.env` (git-ignored). Session data (`auth/`, `browser-data/`) is local-only and git-ignored. No data leaves your machine except AI API calls for invoice parsing.
+- All secrets live in `.env` (git-ignored). No API keys or credentials are committed.
+- Session data (`auth/` for WhatsApp, `browser-data/` for GreytHR cookies) is local-only and git-ignored.
+- Invoice files (`data/`) stay on your machine.
+- The only network egress is to your chosen AI provider (for parsing) and to WhatsApp + GreytHR servers.
 
 ## License
 
